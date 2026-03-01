@@ -10,8 +10,8 @@
   "licensesUrl": "https://youtu.be/dQw4w9WgXcQ",
   "dependencies": {
     "com.xrlab.labframe": "0.0.9",
-    "com.neurotech.neurosdk2": "https://github.com/BrainbitLLC/unity_neurosdk2.git#1.0.11",
-    "com.neurotech.emstartifacts": "https://github.com/BrainbitLLC/unity_em_st_artifacts.git#1.0.3"
+    "com.neurotech.neurosdk2": "https://github.com/BrainbitLLC/unity_neurosdk2.git",
+    "com.neurotech.emstartifacts": "https://github.com/BrainbitLLC/unity_em_st_artifacts.git"
   },
   "author": {
     "name": "NCU wmlab & xrlab",

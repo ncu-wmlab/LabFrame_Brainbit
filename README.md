@@ -70,19 +70,68 @@ BrainBitManager.Instance.SetImpedanceTag("Another_Phase_Impedance");
 BrainBitManager.Instance.StopImpedanceStream();
 ```
 
-#### 👉 判斷各通道阻抗是否過高
-在檢測狀態下，呼叫以下的 API 一次取得四個通道的數值與警示結果：
+#### 👉 判斷各通道阻抗是否過高與取得數值
+可以在 `Update()` 或檢查迴圈中呼叫此段程式碼，一次取得四個通道的數值與警示結果：
 ```csharp
-var data = BrainBitManager.Instance.GetLatestImpedanceData();
-if (data != null)
+void CheckImpedanceStatus()
 {
-    // 直接一次性取得所有數值與 Boolean (檢查是否大於 200,000)
+    // 確保有資料進來
+    var data = BrainBitManager.Instance.GetLatestImpedanceData();
+    if (data == null) return;
+
+    // 直接一次性取得所有數值與 Boolean (各通道大於 200,000 即為 true)
     var (t3_val, t3_high, t4_val, t4_high, o1_val, o1_high, o2_val, o2_high) = data.GetImpedanceValues();
 
-    if (t3_high)
-        Debug.LogWarning($"T3 沒接好，當前阻抗值: {t3_val}");
-    if (t4_high)
-        Debug.LogWarning($"T4 沒接好，當前阻抗值: {t4_val}");
+    // 判斷是否「整體」阻抗都正常 (< 200,000)
+    if (data.IsImpedanceGood)
+    {
+        Debug.Log("✅ 所有通道阻抗良好！可以開始遊戲/實驗了！");
+        // 進入下一階段、開啟 EEG 等等...
+    }
+    else
+    {
+        Debug.LogWarning("❌ 有通道阻抗太高！");
+        
+        // 具體顯示是哪個通道有問題
+        if (t3_high) Debug.LogWarning($"- 左側前額 (T3) 接觸不良，目前數值高達: {t3_val}");
+        if (t4_high) Debug.LogWarning($"- 右側前額 (T4) 接觸不良，目前數值高達: {t4_val}");
+        if (o1_high) Debug.LogWarning($"- 左後腦 (O1) 接觸不良，目前數值高達: {o1_val}");
+        if (o2_high) Debug.LogWarning($"- 右後腦 (O2) 接觸不良，目前數值高達: {o2_val}");
+    }
+}
+```
+
+---
+
+### 4. 設備搜尋與多設備選擇機制
+
+預設情況下，`BrainBitManager` 會自動過濾周遭的藍牙設備，只尋找型號為 `SensorLEBrainBit` 的腦波儀。
+
+如果現場有多台 BrainBit 同時開啟，系統如何決定連哪台？
+你可以在 Unity Inspector 或是程式碼中修改 `BrainBitConfig.AutoSelectBestSignal` 的設定：
+
+- **`AutoSelectBestSignal = false`（預設）：** 先搶先贏。系統會直接連線到藍牙掃描名單上的第一台設備。
+- **`AutoSelectBestSignal = true`：** 訊號最強優先。系統會比較所有掃描到的 BrainBit 訊號強度 (RSSI)，並自動連線到訊號最強（距離接收器最近）的那台設備。建議在展位或多人環境中開啟此設定。
+
+---
+
+### 5. 實用除錯工具：獲取設備詳細參數
+
+如果需要查看設備底層的詳細資訊（例如：電量、硬體版本、韌體版本、取樣頻率等），可使用內建的解析器 `SensorInfoProvider.cs` 將複雜的底層參數結構化。
+
+```csharp
+using NeuroSDK;
+
+void ShowDeviceInfo(BrainBitSensor sensor)
+{
+    // 將龐雜的系統屬性轉換為易讀的 Dictionary
+    Dictionary<string, string> parameters = SensorInfoProvider.GetBrainBitSensorParameters(sensor);
+
+    foreach (var param in parameters)
+    {
+        Debug.Log($"[{param.Key}]: {param.Value}");
+        // 範例輸出： [BattPower]: 85, [State]: StateInRange, [SamplingFrequency]: 250
+    }
 }
 ```
 

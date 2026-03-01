@@ -1,0 +1,28 @@
+{
+  "name": "com.xrlab.labframe_brainbit",
+  "version": "1.0.0",
+  "displayName": "Lab Frame 2023 - BrainBit Plugin",
+  "description": "BrainBit Support for LabFrame2023.\nNote: Currently only supports BrainBit in lab!!",
+  "unity": "2022.3",
+  "unityRelease": "62f2",
+  "documentationUrl": "https://github.com/ncu-wmlab/LabFrame2023",
+  "changelogUrl": "https://github.com/ncu-wmlab/LabFrame_Brainbit",
+  "licensesUrl": "https://youtu.be/dQw4w9WgXcQ",
+  "dependencies": {
+    "com.xrlab.labframe": "0.0.9",
+    "com.neurotech.neurosdk2": "1.0.11",
+    "com.neurotech.emstartifacts": "1.0.3"
+  },
+  "author": {
+    "name": "NCU wmlab & xrlab",
+    "email": "wmlabwmlab@gmail.com",
+    "url": "https://staff.csie.ncu.edu.tw/shihchingyeh/index2.html"
+  },
+  "samples": [
+    {
+      "displayName": "BrainBit",
+      "description": "You'll need XR Interaction Toolkit v.2.0 or newer to run this sample.",
+      "path": "Samples~/BrainBit"
+    }
+  ]
+}

@@ -2,6 +2,7 @@
     "name": "Brainbit",
     "rootNamespace": "",
     "references": [
+        "GUID:4ae46e9e27b84b8d8a17c8749576b725",
         "GUID:446fbb70571d4224d98108c0517d6b29",
         "GUID:a5a806c53ddbe413484b9d0109675c29",
         "GUID:6055be8ebefd69e48b49212b09b47b2f"

@@ -1,6 +1,6 @@
 {
   "name": "com.xrlab.labframe_brainbit",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "displayName": "Lab Frame 2023 - BrainBit Plugin",
   "description": "BrainBit Support for LabFrame2023.\nNote: Currently only supports BrainBit in lab!!",
   "unity": "2022.3",

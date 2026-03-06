@@ -1,6 +1,7 @@
 using UnityEngine;
 using System.Collections;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using LabFrame2023;
 using UnityEngine.Events;
 using NeuroSDK;
@@ -91,6 +92,9 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
     private string _currentEEGTag = "eeg";
     // 用於記錄目前阻抗寫入資料的標籤
     private string _currentImpedanceTag = "impedance";
+
+    // 主執行緒派發佇列，用於將背景執行緒的回呼安全地轉移到主執行緒執行
+    private readonly ConcurrentQueue<Action> _mainThreadActions = new ConcurrentQueue<Action>();
     #endregion
 
     #region IManager Implementation
@@ -117,6 +121,24 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
         LabTools.Log("[BrainBit] Manager initialized successfully");
         LabTools.Log($"[BrainBit] Config - AutoConnect: {_config.AutoConnectOnInit}, ScanTimeout: {_config.ScanTimeoutSeconds}s");
         LabTools.Log($"[BrainBit] Config - AutoSelectBestSignal: {_config.AutoSelectBestSignal}, ConnectDelay: {_config.ConnectDelaySeconds}s");
+    }
+
+    /// <summary>
+    /// 每幀執行主執行緒佇列中的 Action（處理從背景執行緒派發過來的回呼）
+    /// </summary>
+    private void Update()
+    {
+        while (_mainThreadActions.TryDequeue(out var action))
+        {
+            try
+            {
+                action?.Invoke();
+            }
+            catch (Exception e)
+            {
+                LabTools.LogError($"[BrainBit] Error executing main thread action: {e.Message}");
+            }
+        }
     }
 
     public IEnumerator ManagerDispose()
@@ -174,8 +196,11 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
         {
             LabTools.Log("[BrainBit] Starting device scan...");
 
-            // 根據 BrainBit SDK2 文檔，確保使用正確的 SensorFamily
-            _scanner = new Scanner(SensorFamily.SensorLEBrainBit);
+            // 重用 Scanner，避免重複建立造成 native 資源洩漏
+            if (_scanner == null)
+            {
+                _scanner = new Scanner(SensorFamily.SensorLEBrainBit);
+            }
             _scanner.EventSensorsChanged += OnSensorsFound;
 
             // 開始掃描
@@ -520,37 +545,46 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
 
     private void OnSensorsFound(IScanner scanner, IReadOnlyList<SensorInfo> sensors)
     {
+        // 此回呼由 NeuroSDK 在背景執行緒觸發！
+        // 必須將所有 Unity API 呼叫（StartCoroutine、StopCoroutine 等）派發到主執行緒
         try
         {
-            LabTools.Log($"[BrainBit] Found {sensors.Count} device(s)");
-
-            // 觸發設備發現事件
-            OnDeviceFound?.Invoke(new List<SensorInfo>(sensors));
+            LabTools.Log($"[BrainBit] Found {sensors.Count} device(s) (background thread)");
 
             if (sensors.Count > 0)
             {
-                // 重要：根據 BrainBit SDK 要求，必須先停止掃描才能建立連接
-                StopScan();
-
-                // 選擇要連接的設備
+                // 選擇要連接的設備（純邏輯，不涉及 Unity API，可以在背景執行緒執行）
                 SensorInfo targetSensor = SelectBestDevice(sensors);
-
                 LabTools.Log($"[BrainBit] Selected device: {targetSensor.Name} (RSSI: {targetSensor.RSSI})");
-                if (_scanTimeoutCoroutine != null)
-                {
-                    StopCoroutine(_scanTimeoutCoroutine);
-                    _scanTimeoutCoroutine = null;
-                    LabTools.Log("[BrainBit] Scan timeout coroutine stopped");
-                }
 
-                // 等待一段時間後建立連接（確保掃描完全停止）
-                StartCoroutine(DelayedConnect(targetSensor));
+                // 先在背景緒停止 Scanner（SDK 層級，非 Unity API）
+                _scanner?.Stop();
+                _scanner.EventSensorsChanged -= OnSensorsFound;
+
+                // 將剩下的操作排入主執行緒執行
+                _mainThreadActions.Enqueue(() =>
+                {
+                    IsScanning = false;
+
+                    // 觸發設備發現事件
+                    OnDeviceFound?.Invoke(new List<SensorInfo>(sensors));
+
+                    if (_scanTimeoutCoroutine != null)
+                    {
+                        StopCoroutine(_scanTimeoutCoroutine);
+                        _scanTimeoutCoroutine = null;
+                        LabTools.Log("[BrainBit] Scan timeout coroutine stopped");
+                    }
+
+                    // 等待一段時間後建立連接（確保掃描完全停止）
+                    StartCoroutine(DelayedConnect(targetSensor));
+                });
             }
         }
         catch (Exception e)
         {
             LabTools.LogError($"[BrainBit] Error in OnSensorsFound: {e.Message}");
-            OnError?.Invoke($"Device discovery error: {e.Message}");
+            _mainThreadActions.Enqueue(() => OnError?.Invoke($"Device discovery error: {e.Message}"));
         }
     }
 
@@ -611,6 +645,13 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
         try
         {
             LabTools.Log($"[BrainBit] Connecting to device: {sensorInfo.Name} ({sensorInfo.Address})");
+
+            // 清理舊的 Sensor（如果有的話），避免 native 資源洩漏
+            if (_currentSensor != null)
+            {
+                try { _currentSensor.Dispose(); } catch (Exception) { }
+                _currentSensor = null;
+            }
 
             // 創建 Sensor（此時掃描已停止）
             _currentSensor = _scanner.CreateSensor(sensorInfo) as BrainBitSensor;
@@ -716,20 +757,26 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
 
     private void OnSignalDataReceived(ISensor sensor, BrainBitSignalData[] data)
     {
+        // 此回呼由 NeuroSDK 在背景執行緒觸發！
         try
         {
             foreach (var packet in data)
             {
-                _lastEEGData = new BrainBit_EEGData(packet.T3, packet.T4, packet.O1, packet.O2);
+                var eegData = new BrainBit_EEGData(packet.T3, packet.T4, packet.O1, packet.O2);
+                _lastEEGData = eegData;
 
-                // 觸發事件
-                OnEEGDataReceived?.Invoke(_lastEEGData);
-
-                // 自動保存到 LabDataManager
-                if (_autoWriteEEGData && LabDataManager.Instance.IsInited)
+                // 將事件觸發和資料寫入排入主執行緒
+                _mainThreadActions.Enqueue(() =>
                 {
-                    LabDataManager.Instance.WriteData(_lastEEGData, _currentEEGTag);
-                }
+                    // 觸發事件（訂閱者可能更新 UI）
+                    OnEEGDataReceived?.Invoke(eegData);
+
+                    // 自動保存到 LabDataManager
+                    if (_autoWriteEEGData && LabDataManager.Instance.IsInited)
+                    {
+                        LabDataManager.Instance.WriteData(eegData, _currentEEGTag);
+                    }
+                });
             }
         }
         catch (Exception e)
@@ -740,24 +787,30 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
 
     private void OnResistanceDataReceived(ISensor sensor, BrainBitResistData data)
     {
+        // 此回呼由 NeuroSDK 在背景執行緒觸發！
         try
         {
-            _lastImpedanceData = new BrainBit_ImpedanceData(data.T3, data.T4, data.O1, data.O2);
+            var impedanceData = new BrainBit_ImpedanceData(data.T3, data.T4, data.O1, data.O2);
+            _lastImpedanceData = impedanceData;
 
-            // 觸發事件
-            OnImpedanceDataReceived?.Invoke(_lastImpedanceData);
-
-            // 檢查阻抗警告: 當有任一通道阻抗超過 200,000 時
-            if (!_lastImpedanceData.IsImpedanceGood)
+            // 將事件觸發和資料寫入排入主執行緒
+            _mainThreadActions.Enqueue(() =>
             {
-                LabTools.LogError($"[BrainBit] High impedance detected: {_lastImpedanceData.GetImpedanceStatus()}");
-            }
+                // 觸發事件（訂閱者可能更新 UI）
+                OnImpedanceDataReceived?.Invoke(impedanceData);
 
-            // 自動保存到 LabDataManager
-            if (_autoWriteImpedanceData && LabDataManager.Instance.IsInited)
-            {
-                LabDataManager.Instance.WriteData(_lastImpedanceData, _currentImpedanceTag);
-            }
+                // 檢查阻抗警告: 當有任一通道阻抗超過 200,000 時
+                if (!impedanceData.IsImpedanceGood)
+                {
+                    LabTools.LogError($"[BrainBit] High impedance detected: {impedanceData.GetImpedanceStatus()}");
+                }
+
+                // 自動保存到 LabDataManager
+                if (_autoWriteImpedanceData && LabDataManager.Instance.IsInited)
+                {
+                    LabDataManager.Instance.WriteData(impedanceData, _currentImpedanceTag);
+                }
+            });
         }
         catch (Exception e)
         {

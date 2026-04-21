@@ -1,6 +1,7 @@
 using UnityEngine;
 using System.Collections;
 using System.Collections.Generic;
+using SignalMath;
 
 /// <summary>
 /// BrainBit 設備配置
@@ -48,4 +49,19 @@ public class BrainBitConfig
     /// 停止掃描後等待一段時間再建立連接
     /// </summary>
     public float ConnectDelaySeconds = 1.0f;
+
+    /// <summary>
+    /// 情緒處理校正時間（秒）。較長 → 較穩定，但受測者要等更久。
+    /// </summary>
+    public int EmotionsCalibrationLength = 6;
+
+    /// <summary>
+    /// 啟用 Mental Estimation（依實驗類型決定是否開啟）。
+    /// </summary>
+    public bool EmotionsMentalEstimation = false;
+
+    /// <summary>
+    /// 情緒分析優先腦側：NONE / LEFT / RIGHT，預設 NONE（雙側平均）。
+    /// </summary>
+    public SideType EmotionsPrioritySide = SideType.NONE;
 }

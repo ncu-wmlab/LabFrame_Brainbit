@@ -5,6 +5,7 @@ using System.Collections.Concurrent;
 using LabFrame2023;
 using UnityEngine.Events;
 using NeuroSDK;
+using SignalMath;
 using System;
 
 /// <summary>
@@ -43,6 +44,21 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
     /// 是否正在掃描設備
     /// </summary>
     public bool IsScanning { get; private set; } = false;
+
+    /// <summary>
+    /// 正在跑情緒處理？
+    /// </summary>
+    public bool IsProcessingEmotions { get; private set; } = false;
+
+    /// <summary>
+    /// 情緒校正是否已完成？校正完成前 Mind / Spectral 回傳 null
+    /// </summary>
+    public bool IsEmotionsCalibrated { get; private set; } = false;
+
+    /// <summary>
+    /// 情緒校正進度 0-100
+    /// </summary>
+    public int CalibrationProgress { get; private set; } = 0;
     #endregion
 
     #region Events
@@ -70,6 +86,31 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
     /// 錯誤事件
     /// </summary>
     public event UnityAction<string> OnError;
+
+    /// <summary>
+    /// 情緒/心智資料更新事件
+    /// </summary>
+    public event UnityAction<BrainBit_MindData> OnMindDataReceived;
+
+    /// <summary>
+    /// 五頻段光譜資料更新事件
+    /// </summary>
+    public event UnityAction<BrainBit_SpectralData> OnSpectralDataReceived;
+
+    /// <summary>
+    /// 情緒校正進度 0-100
+    /// </summary>
+    public event UnityAction<int> OnCalibrationProgress;
+
+    /// <summary>
+    /// 情緒校正完成
+    /// </summary>
+    public event UnityAction OnCalibrationFinished;
+
+    /// <summary>
+    /// 偵測到情緒處理期間的雜訊（sequence 或雙側）
+    /// </summary>
+    public event UnityAction<bool> OnEmotionsArtifact;
     #endregion
 
     #region Private Fields
@@ -95,6 +136,16 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
 
     // 主執行緒派發佇列，用於將背景執行緒的回呼安全地轉移到主執行緒執行
     private readonly ConcurrentQueue<Action> _mainThreadActions = new ConcurrentQueue<Action>();
+
+    // === Emotions ===
+    private EmotionsController _emotionsController;
+    private bool   _autoWriteEmotionData = false;
+    private string _currentMindTag       = "mind";
+    private string _currentSpectralTag   = "spectral";
+    private BrainBit_MindData     _lastMindData;
+    private BrainBit_SpectralData _lastSpectralData;
+    // 若為 true，代表 EEG 串流是被情緒處理自動啟動的 — StopEmotionsProcessing 時要一起停
+    private bool _emotionsStartedEEG = false;
     #endregion
 
     #region IManager Implementation
@@ -146,6 +197,7 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
         LabTools.Log("[BrainBit] Disposing BrainBit Manager...");
 
         // 停止所有數據流
+        StopEmotionsProcessing();
         StopEEGStream();
         StopImpedanceStream();
 
@@ -698,6 +750,7 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
             if (IsConnected)
             {
                 // 停止所有數據流
+                StopEmotionsProcessing();
                 StopEEGStream();
                 StopImpedanceStream();
 
@@ -778,6 +831,12 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
                     }
                 });
             }
+
+            // 情緒處理（寄生在同一條 NeuroSDK 背景緒，不開額外 thread）
+            if (IsProcessingEmotions)
+            {
+                _emotionsController?.ProcessData(data);
+            }
         }
         catch (Exception e)
         {
@@ -838,6 +897,16 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
                 _currentSensor = null;
             }
 
+            // 清理情緒控制器
+            if (_emotionsController != null)
+            {
+                UnwireEmotionsCallbacks();
+                _emotionsController.Dispose();
+                _emotionsController = null;
+            }
+            IsProcessingEmotions = false;
+            IsEmotionsCalibrated = false;
+
             // 重置狀態
             IsConnected = false;
             IsStreamingEEG = false;
@@ -851,5 +920,229 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
             LabTools.LogError($"[BrainBit] Error during cleanup: {e.Message}");
         }
     }
+    #endregion
+
+    #region Emotions Processing
+
+    /// <summary>
+    /// 啟動情緒處理（MindData / SpectralData / 校正進度）。
+    /// 若 EEG 串流未啟動，會自動啟動；呼叫 StopEmotionsProcessing 時會同步停止該 EEG 串流。
+    /// </summary>
+    public void StartEmotionsProcessing(bool autoWriteToLabData = true,
+                                        string mindTag = "mind",
+                                        string spectralTag = "spectral")
+    {
+        if (!IsConnected)
+        {
+            LabTools.LogError("[BrainBit] Device not connected");
+            OnError?.Invoke("Device not connected");
+            return;
+        }
+
+        if (IsProcessingEmotions)
+        {
+            LabTools.LogError("[BrainBit] Emotions processing already active");
+            return;
+        }
+
+        try
+        {
+            _autoWriteEmotionData = autoWriteToLabData;
+            _currentMindTag       = string.IsNullOrEmpty(mindTag) ? "mind" : mindTag;
+            _currentSpectralTag   = string.IsNullOrEmpty(spectralTag) ? "spectral" : spectralTag;
+
+            // 若 EEG 未啟動，自動啟動並記錄
+            if (!IsStreamingEEG)
+            {
+                StartEEGStream(autoWriteToLabData: false);
+                _emotionsStartedEEG = true;
+            }
+            else
+            {
+                _emotionsStartedEEG = false;
+            }
+
+            // 建立 / 重建 controller（套用目前 BrainBitConfig）
+            _emotionsController?.Dispose();
+            _emotionsController = new EmotionsController(_config);
+            WireEmotionsCallbacks();
+
+            // 校正狀態重置
+            IsEmotionsCalibrated = false;
+            CalibrationProgress  = 0;
+            _lastMindData        = null;
+            _lastSpectralData    = null;
+
+            _emotionsController.StartCalibration();
+            IsProcessingEmotions = true;
+
+            LabTools.Log($"[BrainBit] Emotions processing started (mindTag: {_currentMindTag}, spectralTag: {_currentSpectralTag})");
+        }
+        catch (Exception e)
+        {
+            LabTools.LogError($"[BrainBit] Failed to start emotions processing: {e.Message}");
+            OnError?.Invoke($"Emotions processing failed: {e.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 停止情緒處理。若本次 EEG 串流是由情緒處理自動啟動的，同步停止該 EEG 串流；
+    /// 否則保留 EEG 串流（避免誤停使用者正在錄的 EEG）。
+    /// </summary>
+    public void StopEmotionsProcessing()
+    {
+        if (!IsProcessingEmotions) return;
+
+        try
+        {
+            IsProcessingEmotions = false;
+
+            if (_emotionsController != null)
+            {
+                UnwireEmotionsCallbacks();
+                _emotionsController.Dispose();
+                _emotionsController = null;
+            }
+
+            _autoWriteEmotionData = false;
+            IsEmotionsCalibrated  = false;
+            CalibrationProgress   = 0;
+
+            if (_emotionsStartedEEG && IsStreamingEEG)
+            {
+                StopEEGStream();
+            }
+            _emotionsStartedEEG = false;
+
+            LabTools.Log("[BrainBit] Emotions processing stopped");
+        }
+        catch (Exception e)
+        {
+            LabTools.LogError($"[BrainBit] Error stopping emotions processing: {e.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 重新校正（例如換受測者、中途摘下又戴回）。
+    /// </summary>
+    public void RestartCalibration()
+    {
+        if (!IsProcessingEmotions || _emotionsController == null)
+        {
+            LabTools.LogError("[BrainBit] Cannot restart calibration - emotions processing not active");
+            return;
+        }
+
+        IsEmotionsCalibrated = false;
+        CalibrationProgress  = 0;
+        _emotionsController.StartCalibration();
+
+        LabTools.Log("[BrainBit] Emotion calibration restarted");
+    }
+
+    /// <summary>
+    /// 動態切換 MindData 寫入 Tag
+    /// </summary>
+    public void SetMindTag(string tag)
+    {
+        _currentMindTag = string.IsNullOrEmpty(tag) ? "mind" : tag;
+        LabTools.Log($"[BrainBit] Mind data tag dynamically changed to: {_currentMindTag}");
+    }
+
+    /// <summary>
+    /// 動態切換 SpectralData 寫入 Tag
+    /// </summary>
+    public void SetSpectralTag(string tag)
+    {
+        _currentSpectralTag = string.IsNullOrEmpty(tag) ? "spectral" : tag;
+        LabTools.Log($"[BrainBit] Spectral data tag dynamically changed to: {_currentSpectralTag}");
+    }
+
+    /// <summary>
+    /// 取得最新的情緒/心智資料。校正完成前回傳 null。
+    /// </summary>
+    public BrainBit_MindData GetLatestMindData() => _lastMindData;
+
+    /// <summary>
+    /// 取得最新的五頻段光譜資料。校正完成前回傳 null。
+    /// </summary>
+    public BrainBit_SpectralData GetLatestSpectralData() => _lastSpectralData;
+
+    private void WireEmotionsCallbacks()
+    {
+        if (_emotionsController == null) return;
+
+        _emotionsController.progressCalibrationCallback      = OnEmotionsCalibrationProgress;
+        _emotionsController.lastMindDataCallback             = OnRawMindDataReceived;
+        _emotionsController.lastSpectralDataCallback         = OnRawSpectralDataReceived;
+        _emotionsController.isArtefactedSequenceCallback     = OnEmotionsArtifactDetected;
+        _emotionsController.isBothSidesArtifactedCallback    = OnEmotionsArtifactDetected;
+    }
+
+    private void UnwireEmotionsCallbacks()
+    {
+        if (_emotionsController == null) return;
+
+        _emotionsController.progressCalibrationCallback      = null;
+        _emotionsController.lastMindDataCallback             = null;
+        _emotionsController.lastSpectralDataCallback         = null;
+        _emotionsController.isArtefactedSequenceCallback     = null;
+        _emotionsController.isBothSidesArtifactedCallback    = null;
+    }
+
+    private void OnEmotionsCalibrationProgress(int progress)
+    {
+        // 這些 callback 由 NeuroSDK/EmotionsController 在背景緒觸發
+        _mainThreadActions.Enqueue(() =>
+        {
+            CalibrationProgress = progress;
+            OnCalibrationProgress?.Invoke(progress);
+
+            if (progress >= 100 && !IsEmotionsCalibrated)
+            {
+                IsEmotionsCalibrated = true;
+                OnCalibrationFinished?.Invoke();
+                LabTools.Log("[BrainBit] Emotion calibration finished");
+            }
+        });
+    }
+
+    private void OnRawMindDataReceived(MindData raw)
+    {
+        var wrapped = new BrainBit_MindData(raw);
+        _lastMindData = wrapped;
+
+        _mainThreadActions.Enqueue(() =>
+        {
+            OnMindDataReceived?.Invoke(wrapped);
+
+            if (_autoWriteEmotionData && LabDataManager.Instance.IsInited)
+            {
+                LabDataManager.Instance.WriteData(wrapped, _currentMindTag);
+            }
+        });
+    }
+
+    private void OnRawSpectralDataReceived(SpectralDataPercents raw)
+    {
+        var wrapped = new BrainBit_SpectralData(raw);
+        _lastSpectralData = wrapped;
+
+        _mainThreadActions.Enqueue(() =>
+        {
+            OnSpectralDataReceived?.Invoke(wrapped);
+
+            if (_autoWriteEmotionData && LabDataManager.Instance.IsInited)
+            {
+                LabDataManager.Instance.WriteData(wrapped, _currentSpectralTag);
+            }
+        });
+    }
+
+    private void OnEmotionsArtifactDetected(bool hasArtifact)
+    {
+        _mainThreadActions.Enqueue(() => OnEmotionsArtifact?.Invoke(hasArtifact));
+    }
+
     #endregion
 }

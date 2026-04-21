@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using LabFrame2023;
 using System;
+using SignalMath;
 
 /// <summary>
 /// BrainBit EEG 數據
@@ -184,4 +185,72 @@ public class BrainBit_ConnectionData : LabDataBase
     {
         return $"{EventType}: {DeviceName} ({DeviceAddress}) - Connected: {IsConnected}";
     }
+}
+
+/// <summary>
+/// BrainBit 情緒/心智狀態數據（專注、放鬆）
+/// </summary>
+[Serializable]
+public class BrainBit_MindData : LabDataBase
+{
+    /// <summary>相對專注度（平滑值，0-100，建議使用）</summary>
+    public double Attention;
+
+    /// <summary>相對放鬆度（平滑值，0-100，建議使用）</summary>
+    public double Relaxation;
+
+    /// <summary>瞬時專注度（抖動大，進階用）</summary>
+    public double InstAttention;
+
+    /// <summary>瞬時放鬆度（抖動大，進階用）</summary>
+    public double InstRelaxation;
+
+    public BrainBit_MindData() : base() { }
+
+    public BrainBit_MindData(MindData raw) : base()
+    {
+        Attention      = raw.RelAttention;
+        Relaxation     = raw.RelRelaxation;
+        InstAttention  = raw.InstAttention;
+        InstRelaxation = raw.InstRelaxation;
+    }
+
+    public override string ToString()
+        => $"Attention: {Attention:F1} | Relaxation: {Relaxation:F1}";
+}
+
+/// <summary>
+/// BrainBit 五頻段光譜百分比
+/// </summary>
+[Serializable]
+public class BrainBit_SpectralData : LabDataBase
+{
+    /// <summary>δ 波（深度放鬆 / 睡眠）</summary>
+    public double Delta;
+
+    /// <summary>θ 波（冥想 / 創意）</summary>
+    public double Theta;
+
+    /// <summary>α 波（放鬆清醒）</summary>
+    public double Alpha;
+
+    /// <summary>β 波（專注思考）</summary>
+    public double Beta;
+
+    /// <summary>γ 波（高階認知）</summary>
+    public double Gamma;
+
+    public BrainBit_SpectralData() : base() { }
+
+    public BrainBit_SpectralData(SpectralDataPercents raw) : base()
+    {
+        Delta = raw.Delta;
+        Theta = raw.Theta;
+        Alpha = raw.Alpha;
+        Beta  = raw.Beta;
+        Gamma = raw.Gamma;
+    }
+
+    public override string ToString()
+        => $"δ:{Delta:F1} θ:{Theta:F1} α:{Alpha:F1} β:{Beta:F1} γ:{Gamma:F1}";
 }

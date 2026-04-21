@@ -38,10 +38,10 @@ public class EmotionsController
 
     public void Dispose() { _math.Dispose(); }
 
-    public void StartCalibration() 
+    public void StartCalibration()
     {
-        if(!_math.CalibrationFinished())
-            _math.StartCalibration(); 
+        isCalibrated = false;
+        _math.StartCalibration();
     }
 
     public void ProcessData(BrainBitSignalData[] samples)
@@ -91,11 +91,18 @@ public class EmotionsController
 
     private void processCalibration()
     {
+        bool wasCalibrated = isCalibrated;
         isCalibrated = _math.CalibrationFinished();
+
         if (!isCalibrated)
         {
             int progress = _math.GetCallibrationPercents();
             progressCalibrationCallback?.Invoke(progress);
+        }
+        else if (!wasCalibrated)
+        {
+            // Transition: just finished calibrating — emit 100% once
+            progressCalibrationCallback?.Invoke(100);
         }
     }
 

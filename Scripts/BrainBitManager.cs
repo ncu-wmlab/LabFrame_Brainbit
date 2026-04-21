@@ -980,6 +980,11 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
         }
         catch (Exception e)
         {
+            if (_emotionsStartedEEG)
+            {
+                StopEEGStream();
+                _emotionsStartedEEG = false;
+            }
             LabTools.LogError($"[BrainBit] Failed to start emotions processing: {e.Message}");
             OnError?.Invoke($"Emotions processing failed: {e.Message}");
         }
@@ -1110,10 +1115,10 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
     private void OnRawMindDataReceived(MindData raw)
     {
         var wrapped = new BrainBit_MindData(raw);
-        _lastMindData = wrapped;
 
         _mainThreadActions.Enqueue(() =>
         {
+            _lastMindData = wrapped;
             OnMindDataReceived?.Invoke(wrapped);
 
             if (_autoWriteEmotionData && LabDataManager.Instance.IsInited)
@@ -1126,10 +1131,10 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
     private void OnRawSpectralDataReceived(SpectralDataPercents raw)
     {
         var wrapped = new BrainBit_SpectralData(raw);
-        _lastSpectralData = wrapped;
 
         _mainThreadActions.Enqueue(() =>
         {
+            _lastSpectralData = wrapped;
             OnSpectralDataReceived?.Invoke(wrapped);
 
             if (_autoWriteEmotionData && LabDataManager.Instance.IsInited)

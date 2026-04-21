@@ -2,11 +2,16 @@
 
 此套件為 LabFrame 2023 專用的 BrainBit 設備插件，用於連接與管理 BrainBit 腦波儀。
 
+> [!NOTE]
+> 請再記得多安裝此套件 https://github.com/BrainbitLLC/unity_em_st_artifacts.git#a04238a934b3da0494dd9120a489005277063a1f
+> 開發當下此套件最新版(1.0.3)在android平台會有問題
+
 ## 支援功能
 1. **設備連線管理：** 自動搜尋並手動觸發連接藍牙 BrainBit 設備。
 2. **EEG 腦波數據收集：** 自動收集四個通道 (T3, T4, O1, O2) 的腦波數據。
 3. **即時阻抗檢查：** 確認電極與頭皮的接觸阻抗值是否過高 (> 200,000Ω)。
 4. **多階段資料分流儲存：** 收集期間可動態切換儲存 Tag（依照遊戲階段無縫寫入不同檔案）。
+5. **情緒與光譜分析：** 透過 NeuroSDK `EegEmotionalMath` 即時運算專注 / 放鬆（MindData）與 δ/θ/α/β/γ 五頻段光譜百分比。
 
 ---
 
@@ -103,7 +108,95 @@ void CheckImpedanceStatus()
 
 ---
 
-### 4. 設備搜尋與多設備選擇機制
+### 4. 情緒與光譜分析 (MindData / SpectralData)
+
+整合 NeuroSDK `EegEmotionalMath`，即時取得受測者的**專注度 / 放鬆度**以及**五頻段光譜百分比**。
+
+> 情緒處理需要先完成約 6 秒的**校正** (請受測者安靜配戴)，校正完成後才會開始輸出有效的 MindData / SpectralData。
+
+#### 👉 開始 / 停止情緒處理
+
+```csharp
+// 啟動情緒處理（若 EEG 尚未啟動，會自動開啟；停止時會一併停止該次自動啟動的 EEG）
+BrainBitManager.Instance.StartEmotionsProcessing(
+    autoWriteToLabData: true,
+    mindTag: "Gameplay_Mind",
+    spectralTag: "Gameplay_Spectral");
+
+// 停止情緒處理
+BrainBitManager.Instance.StopEmotionsProcessing();
+```
+
+#### 👉 等待校正完成
+
+```csharp
+BrainBitManager.Instance.OnCalibrationProgress += pct => Debug.Log($"校正中 {pct}%");
+BrainBitManager.Instance.OnCalibrationFinished += () => Debug.Log("校正完成！");
+
+// 或在輪詢中判斷：
+if (BrainBitManager.Instance.IsEmotionsCalibrated)
+{
+    // 此時才能讀到有效的 MindData / SpectralData
+}
+```
+
+若遊戲中需要重新校正（換受測者、中途摘下又戴回）：
+```csharp
+BrainBitManager.Instance.RestartCalibration();
+```
+
+#### 👉 取得最新的專注 / 放鬆值
+
+```csharp
+void Update()
+{
+    if (!BrainBitManager.Instance.IsEmotionsCalibrated) return;
+
+    var mind = BrainBitManager.Instance.GetLatestMindData();
+    if (mind == null) return;
+
+    Debug.Log($"專注: {mind.Attention:F1} / 放鬆: {mind.Relaxation:F1}");
+    // mind.InstAttention / mind.InstRelaxation 為瞬時值（抖動大，僅進階使用）
+}
+```
+
+#### 👉 取得最新的五頻段光譜百分比
+
+```csharp
+var spec = BrainBitManager.Instance.GetLatestSpectralData();
+if (spec != null)
+{
+    Debug.Log($"δ:{spec.Delta:F1} θ:{spec.Theta:F1} α:{spec.Alpha:F1} β:{spec.Beta:F1} γ:{spec.Gamma:F1}");
+}
+```
+
+#### 👉 事件訂閱（event-driven 寫法）
+
+```csharp
+BrainBitManager.Instance.OnMindDataReceived     += mind => { /* 更新 UI */ };
+BrainBitManager.Instance.OnSpectralDataReceived += spec => { /* 更新 UI */ };
+BrainBitManager.Instance.OnEmotionsArtifact     += hasArtifact => { /* 顯示雜訊警告 */ };
+```
+
+#### 👉 動態無縫切換儲存階段 (Tag)
+
+```csharp
+// 不用停情緒處理，下一筆資料就會被寫進新 tag
+BrainBitManager.Instance.SetMindTag("Boss_Phase_Mind");
+BrainBitManager.Instance.SetSpectralTag("Boss_Phase_Spectral");
+```
+
+#### 👉 可調設定（`BrainBitConfig`）
+
+| 欄位 | 預設 | 說明 |
+|---|---|---|
+| `EmotionsCalibrationLength` | `6` | 校正時間（秒）。越長越穩，但受測者需要等更久 |
+| `EmotionsMentalEstimation` | `false` | 啟用 Mental Estimation（依實驗類型決定） |
+| `EmotionsPrioritySide` | `SideType.NONE` | 優先分析腦側：`NONE` / `LEFT` / `RIGHT` |
+
+---
+
+### 5. 設備搜尋與多設備選擇機制
 
 預設情況下，`BrainBitManager` 會自動過濾周遭的藍牙設備，只尋找型號為 `SensorLEBrainBit` 的腦波儀。
 
@@ -115,7 +208,7 @@ void CheckImpedanceStatus()
 
 ---
 
-### 5. 實用除錯工具：獲取設備詳細參數
+### 6. 實用除錯工具：獲取設備詳細參數
 
 如果需要查看設備底層的詳細資訊（例如：電量、硬體版本、韌體版本、取樣頻率等），可使用內建的解析器 `SensorInfoProvider.cs` 將複雜的底層參數結構化。
 

@@ -128,6 +128,8 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
     private Coroutine _scanTimeoutCoroutine;
 
     private int _reconnectAttempts = 0;
+    private bool _isInitialized = false;
+    private bool _autoConnectScheduled = false;
 
     // 用於記錄目前 EEG 寫入資料的標籤 (對應不同的儲存檔案)
     private string _currentEEGTag = "eeg";
@@ -139,10 +141,10 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
 
     // === Emotions ===
     private EmotionsController _emotionsController;
-    private bool   _autoWriteEmotionData = false;
-    private string _currentMindTag       = "mind";
-    private string _currentSpectralTag   = "spectral";
-    private BrainBit_MindData     _lastMindData;
+    private bool _autoWriteEmotionData = false;
+    private string _currentMindTag = "mind";
+    private string _currentSpectralTag = "spectral";
+    private BrainBit_MindData _lastMindData;
     private BrainBit_SpectralData _lastSpectralData;
     // 若為 true，代表 EEG 串流是被情緒處理自動啟動的 — StopEmotionsProcessing 時要一起停
     private bool _emotionsStartedEEG = false;
@@ -154,18 +156,19 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
         LabTools.Log("[BrainBit] Initializing BrainBit Manager...");
 
         // 載入配置
-        _config = LabTools.GetConfig<BrainBitConfig>(true);
+        if (!EnsureInitialized(nameof(ManagerInit)))
+        {
+            return;
+        }
 
         // 初始化數據對象
-        _lastEEGData = new BrainBit_EEGData();
-        _lastImpedanceData = new BrainBit_ImpedanceData();
 
         // 開始連接監控
-        _connectionMonitorCoroutine = StartCoroutine(MonitorConnection());
 
         // 自動連接
-        if (_config.AutoConnectOnInit)
+        if (_config.AutoConnectOnInit && !_autoConnectScheduled && !IsConnected && !IsScanning)
         {
+            _autoConnectScheduled = true;
             StartCoroutine(DelayedAutoConnect());
         }
 
@@ -233,11 +236,53 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
     #endregion
 
     #region Public Methods
+    private bool EnsureInitialized(string callerName)
+    {
+        if (_isInitialized && _config != null)
+        {
+            return true;
+        }
+
+        try
+        {
+            _config ??= LabTools.GetConfig<BrainBitConfig>(true);
+            if (_config == null)
+            {
+                LabTools.LogError($"[BrainBit] {callerName} failed - BrainBitConfig is missing");
+                OnError?.Invoke("BrainBit config is missing");
+                return false;
+            }
+
+            _lastEEGData ??= new BrainBit_EEGData();
+            _lastImpedanceData ??= new BrainBit_ImpedanceData();
+
+            if (_connectionMonitorCoroutine == null)
+            {
+                _connectionMonitorCoroutine = StartCoroutine(MonitorConnection());
+            }
+
+            _isInitialized = true;
+            LabTools.Log($"[BrainBit] Initialization ready for {callerName}");
+            return true;
+        }
+        catch (Exception e)
+        {
+            LabTools.LogError($"[BrainBit] {callerName} failed during initialization: {e.Message}");
+            OnError?.Invoke($"Initialization failed: {e.Message}");
+            return false;
+        }
+    }
+
     /// <summary>
     /// 開始掃描 BrainBit 設備
     /// </summary>
     public void StartScan()
     {
+        if (!EnsureInitialized(nameof(StartScan)))
+        {
+            return;
+        }
+
         if (IsScanning)
         {
             LabTools.LogError("[BrainBit] Already scanning for devices");
@@ -579,8 +624,16 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
 
     private IEnumerator ScanTimeout()
     {
-        LabTools.Log($"[BrainBit] Scan timeout set for {_config.ScanTimeoutSeconds} seconds");
-        yield return new WaitForSeconds(_config.ScanTimeoutSeconds);
+        if (!EnsureInitialized(nameof(ScanTimeout)))
+        {
+            IsScanning = false;
+            _scanTimeoutCoroutine = null;
+            yield break;
+        }
+
+        float timeoutSeconds = _config.ScanTimeoutSeconds;
+        LabTools.Log($"[BrainBit] Scan timeout set for {timeoutSeconds} seconds");
+        yield return new WaitForSeconds(timeoutSeconds);
 
         if (_scanTimeoutCoroutine != null && _currentSensor == null)
         {
@@ -683,10 +736,16 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
     /// <param name="sensorInfo">設備信息</param>
     private IEnumerator DelayedConnect(SensorInfo sensorInfo)
     {
-        LabTools.Log($"[BrainBit] Waiting {_config.ConnectDelaySeconds}s before connecting...");
+        if (!EnsureInitialized(nameof(DelayedConnect)))
+        {
+            yield break;
+        }
+
+        float connectDelaySeconds = _config.ConnectDelaySeconds;
+        LabTools.Log($"[BrainBit] Waiting {connectDelaySeconds}s before connecting...");
 
         // 等待指定時間，確保掃描完全停止
-        yield return new WaitForSeconds(_config.ConnectDelaySeconds);
+        yield return new WaitForSeconds(connectDelaySeconds);
 
         // 建立連接
         ConnectToDevice(sensorInfo);
@@ -781,6 +840,12 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
     {
         LabTools.LogError($"[BrainBit] Device disconnected: {ConnectedDeviceName}");
 
+        if (!EnsureInitialized(nameof(HandleDisconnection)))
+        {
+            Disconnect();
+            return;
+        }
+
         if (_config.DisconnectNotification)
         {
             LabPromptBox.Show($"BrainBit 設備已斷線！\nDevice {ConnectedDeviceName} disconnected!");
@@ -797,10 +862,16 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
 
     private IEnumerator AttemptReconnect()
     {
+        if (!EnsureInitialized(nameof(AttemptReconnect)))
+        {
+            yield break;
+        }
+
         _reconnectAttempts++;
         LabTools.Log($"[BrainBit] Attempting reconnection ({_reconnectAttempts}/{_config.AutoReconnectAttempts})...");
 
-        yield return new WaitForSeconds(_config.ReconnectIntervalSeconds);
+        float reconnectIntervalSeconds = _config.ReconnectIntervalSeconds;
+        yield return new WaitForSeconds(reconnectIntervalSeconds);
 
         if (!IsConnected)
         {
@@ -912,6 +983,8 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
             IsStreamingEEG = false;
             IsStreamingImpedance = false;
             IsScanning = false;
+            _isInitialized = false;
+            _autoConnectScheduled = false;
 
             LabTools.Log("[BrainBit] Resources cleaned up");
         }
@@ -932,6 +1005,11 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
                                         string mindTag = "mind",
                                         string spectralTag = "spectral")
     {
+        if (!EnsureInitialized(nameof(StartEmotionsProcessing)))
+        {
+            return;
+        }
+
         if (!IsConnected)
         {
             LabTools.LogError("[BrainBit] Device not connected");
@@ -948,8 +1026,8 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
         try
         {
             _autoWriteEmotionData = autoWriteToLabData;
-            _currentMindTag       = string.IsNullOrEmpty(mindTag) ? "mind" : mindTag;
-            _currentSpectralTag   = string.IsNullOrEmpty(spectralTag) ? "spectral" : spectralTag;
+            _currentMindTag = string.IsNullOrEmpty(mindTag) ? "mind" : mindTag;
+            _currentSpectralTag = string.IsNullOrEmpty(spectralTag) ? "spectral" : spectralTag;
 
             // 若 EEG 未啟動，自動啟動並記錄
             if (!IsStreamingEEG)
@@ -969,9 +1047,9 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
 
             // 校正狀態重置
             IsEmotionsCalibrated = false;
-            CalibrationProgress  = 0;
-            _lastMindData        = null;
-            _lastSpectralData    = null;
+            CalibrationProgress = 0;
+            _lastMindData = null;
+            _lastSpectralData = null;
 
             _emotionsController.StartCalibration();
             IsProcessingEmotions = true;
@@ -1010,8 +1088,8 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
             }
 
             _autoWriteEmotionData = false;
-            IsEmotionsCalibrated  = false;
-            CalibrationProgress   = 0;
+            IsEmotionsCalibrated = false;
+            CalibrationProgress = 0;
 
             if (_emotionsStartedEEG && IsStreamingEEG)
             {
@@ -1039,7 +1117,7 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
         }
 
         IsEmotionsCalibrated = false;
-        CalibrationProgress  = 0;
+        CalibrationProgress = 0;
         _emotionsController.StartCalibration();
 
         LabTools.Log("[BrainBit] Emotion calibration restarted");
@@ -1077,22 +1155,22 @@ public class BrainBitManager : LabSingleton<BrainBitManager>, IManager
     {
         if (_emotionsController == null) return;
 
-        _emotionsController.progressCalibrationCallback      = OnEmotionsCalibrationProgress;
-        _emotionsController.lastMindDataCallback             = OnRawMindDataReceived;
-        _emotionsController.lastSpectralDataCallback         = OnRawSpectralDataReceived;
-        _emotionsController.isArtefactedSequenceCallback     = OnEmotionsArtifactDetected;
-        _emotionsController.isBothSidesArtifactedCallback    = OnEmotionsArtifactDetected;
+        _emotionsController.progressCalibrationCallback = OnEmotionsCalibrationProgress;
+        _emotionsController.lastMindDataCallback = OnRawMindDataReceived;
+        _emotionsController.lastSpectralDataCallback = OnRawSpectralDataReceived;
+        _emotionsController.isArtefactedSequenceCallback = OnEmotionsArtifactDetected;
+        _emotionsController.isBothSidesArtifactedCallback = OnEmotionsArtifactDetected;
     }
 
     private void UnwireEmotionsCallbacks()
     {
         if (_emotionsController == null) return;
 
-        _emotionsController.progressCalibrationCallback      = null;
-        _emotionsController.lastMindDataCallback             = null;
-        _emotionsController.lastSpectralDataCallback         = null;
-        _emotionsController.isArtefactedSequenceCallback     = null;
-        _emotionsController.isBothSidesArtifactedCallback    = null;
+        _emotionsController.progressCalibrationCallback = null;
+        _emotionsController.lastMindDataCallback = null;
+        _emotionsController.lastSpectralDataCallback = null;
+        _emotionsController.isArtefactedSequenceCallback = null;
+        _emotionsController.isBothSidesArtifactedCallback = null;
     }
 
     private void OnEmotionsCalibrationProgress(int progress)
